@@ -18,7 +18,12 @@ fn main() -> ExitCode {
     };
     for line in BufReader::new(file).lines() {
         match line {
-            Ok(line) => println!("{line}"),
+            Ok(line) => {
+            let trimmed = line.trim_end_matches('\r');
+            if trimmed.starts_with('{') && trimmed.ends_with('}') {
+                println!("{trimmed}");
+            }
+        }
             Err(err) => {
                 eprintln!("logq: {path}: {err}");
                 return ExitCode::from(1);
