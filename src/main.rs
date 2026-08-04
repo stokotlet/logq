@@ -1,3 +1,5 @@
+mod parse;
+
 use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -17,17 +19,15 @@ fn main() -> ExitCode {
         }
     };
     for line in BufReader::new(file).lines() {
-        match line {
-            Ok(line) => {
-            let trimmed = line.trim_end_matches('\r');
-            if trimmed.starts_with('{') && trimmed.ends_with('}') {
-                println!("{trimmed}");
-            }
-        }
+        let line = match line {
+            Ok(line) => line,
             Err(err) => {
                 eprintln!("logq: {path}: {err}");
                 return ExitCode::from(1);
             }
+        };
+        if parse::parse_event(&line, &[]).is_some() {
+            println!("{line}");
         }
     }
     ExitCode::SUCCESS
