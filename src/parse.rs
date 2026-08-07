@@ -63,9 +63,6 @@ pub fn parse_time(text: &str) -> Option<i64> {
     if text.is_empty() {
         return None;
     }
-    if let Ok(number) = text.parse::<i64>() {
-        return Some(normalize_epoch(number));
-    }
     if let Ok(dt) = DateTime::parse_from_rfc3339(text) {
         return Some(dt.timestamp_millis());
     }
@@ -80,5 +77,26 @@ fn normalize_epoch(number: i64) -> i64 {
         number
     } else {
         number.saturating_mul(1000)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_common_keys() {
+        let line = r#"{"ts":"2026-08-07T12:00:00Z","lvl":"error","logger":"checkout","message":"declined"}"#;
+        let event = parse_event(line, &[]).unwrap();
+        assert_eq!(event.level, "error");
+        assert_eq!(event.service, "checkout");
+        assert_eq!(event.msg, "declined");
+        assert_eq!(event.ts_ms, 1_786_104_000_000);
+    }
+
+    #[test]
+    fn skips_plain_text() {
+        assert!(parse_event("not json", &[]).is_none());
+        assert!(parse_event(r#"{"msg":"no time"}"#, &[]).is_none());
     }
 }
