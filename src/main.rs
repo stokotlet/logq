@@ -1,8 +1,9 @@
 mod parse;
+mod scan;
 
 use std::env;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -14,14 +15,14 @@ fn main() -> ExitCode {
         match args[i].as_str() {
             "--contains" => {
                 let Some(value) = args.get(i + 1) else {
-                    eprintln!("usage: logq <file> [--contains text]");
+                    eprintln!("usage: logq <path> [--contains text]");
                     return ExitCode::from(2);
                 };
                 contains = Some(value.clone());
                 i += 2;
             }
             other if !other.starts_with('-') && path.is_none() => {
-                path = Some(other.to_string());
+                path = Some(PathBuf::from(other));
                 i += 1;
             }
             other => {
@@ -31,31 +32,24 @@ fn main() -> ExitCode {
         }
     }
     let Some(path) = path else {
-        eprintln!("usage: logq <file> [--contains text]");
+        eprintln!("usage: logq <path> [--contains text]");
         return ExitCode::from(2);
     };
-    let file = match File::open(&path) {
-        Ok(file) => file,
-        Err(err) => {
-            eprintln!("logq: {path}: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    for line in BufReader::new(file).lines() {
-        let line = match line {
-            Ok(line) => line,
-            Err(err) => {
-                eprintln!("logq: {path}: {err}");
-                return ExitCode::from(1);
-            }
-        };
-        if parse::parse_event(&line, &[]).is_none() {
-            continue;
+    let result = scan::for_each_line(&path, |line| {
+        if parse::parse_event(line, &[]).is_none() {
+            return Ok(());
         }
         if contains.as_ref().is_some_and(|text| !line.contains(text)) {
-            continue;
+            return Ok(());
         }
         println!("{line}");
+        Ok(())
+    });
+    if let Err(err) = result {
+        if err.kind() != io::ErrorKind::Interrupted {
+            eprintln!("logq: {}: {err}", path.display());
+            return ExitCode::from(1);
+        }
     }
     ExitCode::SUCCESS
 }
