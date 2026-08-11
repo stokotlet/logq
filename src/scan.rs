@@ -1,3 +1,4 @@
+use flate2::read::GzDecoder;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
@@ -32,13 +33,25 @@ fn is_log(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    name.ends_with(".log") || name.ends_with(".jsonl")
+    name.ends_with(".log")
+        || name.ends_with(".jsonl")
+        || name.ends_with(".log.gz")
+        || name.ends_with(".jsonl.gz")
 }
 
 fn read_file(path: &Path, on_line: &mut impl FnMut(&str) -> io::Result<()>) -> io::Result<()> {
     let file = File::open(path)?;
-    for line in BufReader::new(file).lines() {
+    let reader: Box<dyn BufRead> = if is_gz(path) {
+        Box::new(BufReader::new(GzDecoder::new(file)))
+    } else {
+        Box::new(BufReader::new(file))
+    };
+    for line in reader.lines() {
         on_line(&line?)?;
     }
     Ok(())
+}
+
+fn is_gz(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some("gz")
 }
