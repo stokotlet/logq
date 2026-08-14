@@ -95,6 +95,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_offset_and_space() {
+        let zulu = parse_time("2026-08-07T12:00:00Z").unwrap();
+        let plus = parse_time("2026-08-07T17:00:00+05:00").unwrap();
+        assert_eq!(zulu, plus);
+        let spaced = parse_time("2026-08-07 12:00:00Z").unwrap();
+        assert_eq!(zulu, spaced);
+    }
+
+    #[test]
     fn skips_plain_text() {
         assert!(parse_event("not json", &[]).is_none());
         assert!(parse_event(r#"{"msg":"no time"}"#, &[]).is_none());
