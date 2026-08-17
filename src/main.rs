@@ -1,3 +1,4 @@
+mod index;
 mod parse;
 mod scan;
 
@@ -9,6 +10,9 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("index") {
+        return index_cmd(&args[1..]);
+    }
     let mut path = None;
     let mut contains = None;
     let mut since = None;
@@ -85,6 +89,53 @@ fn main() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+fn index_cmd(args: &[String]) -> ExitCode {
+    let mut input = None;
+    let mut out = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--out" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("usage: logq index <path> [-o dir]");
+                    return ExitCode::from(2);
+                };
+                out = Some(PathBuf::from(value));
+                i += 2;
+            }
+            other if !other.starts_with('-') && input.is_none() => {
+                input = Some(PathBuf::from(other));
+                i += 1;
+            }
+            other => {
+                eprintln!("logq: unknown argument {other}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(input) = input else {
+        eprintln!("usage: logq index <path> [-o dir]");
+        return ExitCode::from(2);
+    };
+    let out = out.unwrap_or_else(|| {
+        if input.is_dir() {
+            input.join(".logq")
+        } else {
+            PathBuf::from(".logq")
+        }
+    });
+    match index::build(&input, &out) {
+        Ok(count) => {
+            println!("{count} lines -> {}", out.display());
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("logq: {err}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn take_time(args: &[String], i: &mut usize) -> Result<i64, ExitCode> {

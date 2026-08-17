@@ -1,0 +1,198 @@
+use crate::parse;
+use crate::scan;
+use flate2::read::GzDecoder;
+use serde_json::json;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+
+const REC: usize = 24;
+
+#[derive(Clone)]
+struct Source {
+    path: String,
+    len: u64,
+    mtime: i64,
+}
+
+pub fn build(input: &Path, out: &Path) -> io::Result<usize> {
+    fs::create_dir_all(out)?;
+    let mut files = Vec::new();
+    let mut lines = Vec::<u8>::new();
+    collect(input, input, out, &mut files, &mut lines)?;
+    let count = lines.len() / REC;
+    fs::write(out.join("lines.dat"), &lines)?;
+    let meta = json!({
+        "files": files.iter().map(|file| json!({
+            "path": file.path,
+            "len": file.len,
+            "mtime": file.mtime,
+        })).collect::<Vec<_>>(),
+        "lines": count,
+    });
+    fs::write(out.join("meta.json"), serde_json::to_vec_pretty(&meta).unwrap())?;
+    Ok(count)
+}
+
+fn collect(
+    root: &Path,
+    current: &Path,
+    out: &Path,
+    files: &mut Vec<Source>,
+    lines: &mut Vec<u8>,
+) -> io::Result<()> {
+    let meta = fs::metadata(current)?;
+    if meta.is_dir() {
+        if current == out {
+            return Ok(());
+        }
+        let mut entries = fs::read_dir(current)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            if path.file_name().and_then(|name| name.to_str()) == Some(".logq") {
+                continue;
+            }
+            collect(root, &path, out, files, lines)?;
+        }
+        return Ok(());
+    }
+    if !is_log(current) && root != current {
+        return Ok(());
+    }
+    if root == current && meta.is_dir() {
+        return Ok(());
+    }
+    let rel = if root == current {
+        current
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| current.to_path_buf())
+    } else {
+        current.strip_prefix(root).unwrap_or(current).to_path_buf()
+    };
+    let file_id = files.len() as u32;
+    files.push(Source {
+        path: rel.to_string_lossy().into_owned(),
+        len: meta.len(),
+        mtime: meta.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0),
+    });
+    read_lines(current, file_id, lines)?;
+    Ok(())
+}
+
+fn is_log(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name.ends_with(".log")
+        || name.ends_with(".jsonl")
+        || name.ends_with(".log.gz")
+        || name.ends_with(".jsonl.gz")
+}
+
+fn read_lines(path: &Path, file_id: u32, lines: &mut Vec<u8>) -> io::Result<()> {
+    let file = File::open(path)?;
+    let reader: Box<dyn BufRead> = if scan::is_gzip(path) {
+        Box::new(BufReader::new(GzDecoder::new(file)))
+    } else {
+        Box::new(BufReader::new(file))
+    };
+    let mut reader = reader;
+    let mut buf = Vec::new();
+    let mut offset = 0u64;
+    loop {
+        buf.clear();
+        let n = reader.read_until(b'\n', &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        let start = offset;
+        offset += n as u64;
+        let text = String::from_utf8_lossy(&buf);
+        let text = text.trim_end_matches(['\r', '\n']);
+        let Some(event) = parse::parse_event(text, &[]) else {
+            continue;
+        };
+        push_rec(lines, event.ts_ms, file_id, start, n as u32);
+    }
+    Ok(())
+}
+
+fn push_rec(lines: &mut Vec<u8>, ts_ms: i64, file_id: u32, offset: u64, len: u32) {
+    lines.extend_from_slice(&ts_ms.to_le_bytes());
+    lines.extend_from_slice(&file_id.to_le_bytes());
+    lines.extend_from_slice(&len.to_le_bytes());
+    lines.extend_from_slice(&offset.to_le_bytes());
+}
+
+pub fn read_record(lines: &[u8], id: usize) -> Option<(i64, u32, u32, u64)> {
+    let start = id.checked_mul(REC)?;
+    let rec = lines.get(start..start + REC)?;
+    let ts = i64::from_le_bytes(rec[0..8].try_into().ok()?);
+    let file_id = u32::from_le_bytes(rec[8..12].try_into().ok()?);
+    let len = u32::from_le_bytes(rec[12..16].try_into().ok()?);
+    let offset = u64::from_le_bytes(rec[16..24].try_into().ok()?);
+    Some((ts, file_id, len, offset))
+}
+
+pub fn load_line(root: &Path, rel: &str, offset: u64, len: u32) -> io::Result<String> {
+    let path = root.join(rel);
+    let file = File::open(&path)?;
+    if scan::is_gzip(&path) {
+        let mut decoder = GzDecoder::new(file);
+        skip(&mut decoder, offset)?;
+        let mut buf = vec![0u8; len as usize];
+        decoder.read_exact(&mut buf)?;
+        return Ok(trim_line(&buf));
+    }
+    let mut file = file;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buf = vec![0u8; len as usize];
+    file.read_exact(&mut buf)?;
+    Ok(trim_line(&buf))
+}
+
+fn skip(reader: &mut impl Read, mut left: u64) -> io::Result<()> {
+    let mut buf = [0u8; 8192];
+    while left > 0 {
+        let n = std::cmp::min(left, buf.len() as u64) as usize;
+        reader.read_exact(&mut buf[..n])?;
+        left -= n as u64;
+    }
+    Ok(())
+}
+
+fn trim_line(buf: &[u8]) -> String {
+    String::from_utf8_lossy(buf)
+        .trim_end_matches(['\r', '\n'])
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn writes_line_table() {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("logq-lines-{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("app.log"),
+            "{\"ts\":\"2026-08-07T12:00:00Z\",\"level\":\"error\",\"msg\":\"nope\"}\nnot json\n",
+        )
+        .unwrap();
+        let out = dir.join("idx");
+        let count = build(&dir, &out).unwrap();
+        assert_eq!(count, 1);
+        let bytes = fs::read(out.join("lines.dat")).unwrap();
+        let (ts, file_id, len, offset) = read_record(&bytes, 0).unwrap();
+        assert_eq!(ts, 1_786_104_000_000);
+        assert_eq!(file_id, 0);
+        let line = load_line(&dir, "app.log", offset, len).unwrap();
+        assert!(line.contains("nope"), "{line}");
+        let _ = fs::remove_dir_all(dir);
+    }
+}
