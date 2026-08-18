@@ -2,9 +2,49 @@ use crate::parse;
 use crate::scan;
 use flate2::read::GzDecoder;
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+
+struct Dict {
+    to_id: HashMap<String, u32>,
+    values: Vec<String>,
+    ids: Vec<u32>,
+}
+
+impl Dict {
+    fn new() -> Self {
+        Self {
+            to_id: HashMap::new(),
+            values: Vec::new(),
+            ids: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, value: &str) {
+        let id = if let Some(id) = self.to_id.get(value) {
+            *id
+        } else {
+            let id = self.values.len() as u32;
+            self.to_id.insert(value.to_string(), id);
+            self.values.push(value.to_string());
+            id
+        };
+        self.ids.push(id);
+    }
+
+    fn write(&self, out: &Path, name: &str) -> io::Result<()> {
+        let listed = serde_json::to_vec_pretty(&self.values).map_err(io::Error::other)?;
+        fs::write(out.join(format!("{name}.json")), listed)?;
+        let mut col = Vec::with_capacity(self.ids.len() * 4);
+        for id in &self.ids {
+            col.extend_from_slice(&id.to_le_bytes());
+        }
+        fs::write(out.join(format!("{name}.col")), col)?;
+        Ok(())
+    }
+}
 
 const REC: usize = 24;
 
@@ -19,9 +59,13 @@ pub fn build(input: &Path, out: &Path) -> io::Result<usize> {
     fs::create_dir_all(out)?;
     let mut files = Vec::new();
     let mut lines = Vec::<u8>::new();
-    collect(input, input, out, &mut files, &mut lines)?;
+    let mut levels = Dict::new();
+    let mut services = Dict::new();
+    collect(input, input, out, &mut files, &mut lines, &mut levels, &mut services)?;
     let count = lines.len() / REC;
     fs::write(out.join("lines.dat"), &lines)?;
+    levels.write(out, "level")?;
+    services.write(out, "service")?;
     let meta = json!({
         "files": files.iter().map(|file| json!({
             "path": file.path,
@@ -40,6 +84,8 @@ fn collect(
     out: &Path,
     files: &mut Vec<Source>,
     lines: &mut Vec<u8>,
+    levels: &mut Dict,
+    services: &mut Dict,
 ) -> io::Result<()> {
     let meta = fs::metadata(current)?;
     if meta.is_dir() {
@@ -53,7 +99,7 @@ fn collect(
             if path.file_name().and_then(|name| name.to_str()) == Some(".logq") {
                 continue;
             }
-            collect(root, &path, out, files, lines)?;
+            collect(root, &path, out, files, lines, levels, services)?;
         }
         return Ok(());
     }
@@ -77,7 +123,7 @@ fn collect(
         len: meta.len(),
         mtime: meta.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0),
     });
-    read_lines(current, file_id, lines)?;
+    read_lines(current, file_id, lines, levels, services)?;
     Ok(())
 }
 
@@ -91,7 +137,13 @@ fn is_log(path: &Path) -> bool {
         || name.ends_with(".jsonl.gz")
 }
 
-fn read_lines(path: &Path, file_id: u32, lines: &mut Vec<u8>) -> io::Result<()> {
+fn read_lines(
+    path: &Path,
+    file_id: u32,
+    lines: &mut Vec<u8>,
+    levels: &mut Dict,
+    services: &mut Dict,
+) -> io::Result<()> {
     let file = File::open(path)?;
     let reader: Box<dyn BufRead> = if scan::is_gzip(path) {
         Box::new(BufReader::new(GzDecoder::new(file)))
@@ -114,6 +166,8 @@ fn read_lines(path: &Path, file_id: u32, lines: &mut Vec<u8>) -> io::Result<()> 
         let Some(event) = parse::parse_event(text, &[]) else {
             continue;
         };
+        levels.push(&event.level);
+        services.push(&event.service);
         push_rec(lines, event.ts_ms, file_id, start, n as u32);
     }
     Ok(())
@@ -187,6 +241,8 @@ mod tests {
         let out = dir.join("idx");
         let count = build(&dir, &out).unwrap();
         assert_eq!(count, 1);
+        let levels: Vec<String> = serde_json::from_slice(&fs::read(out.join("level.json")).unwrap()).unwrap();
+        assert_eq!(levels, vec!["error".to_string()]);
         let bytes = fs::read(out.join("lines.dat")).unwrap();
         let (ts, file_id, len, offset) = read_record(&bytes, 0).unwrap();
         assert_eq!(ts, 1_786_104_000_000);
