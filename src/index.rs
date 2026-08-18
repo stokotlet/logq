@@ -11,6 +11,7 @@ struct Dict {
     to_id: HashMap<String, u32>,
     values: Vec<String>,
     ids: Vec<u32>,
+    posts: Vec<Vec<u32>>,
 }
 
 impl Dict {
@@ -19,19 +20,22 @@ impl Dict {
             to_id: HashMap::new(),
             values: Vec::new(),
             ids: Vec::new(),
+            posts: Vec::new(),
         }
     }
 
-    fn push(&mut self, value: &str) {
+    fn push(&mut self, value: &str, line: u32) {
         let id = if let Some(id) = self.to_id.get(value) {
             *id
         } else {
             let id = self.values.len() as u32;
             self.to_id.insert(value.to_string(), id);
             self.values.push(value.to_string());
+            self.posts.push(Vec::new());
             id
         };
         self.ids.push(id);
+        self.posts[id as usize].push(line);
     }
 
     fn write(&self, out: &Path, name: &str) -> io::Result<()> {
@@ -42,6 +46,19 @@ impl Dict {
             col.extend_from_slice(&id.to_le_bytes());
         }
         fs::write(out.join(format!("{name}.col")), col)?;
+        let mut toc = Vec::new();
+        let mut posted = Vec::new();
+        let mut start = 0u32;
+        for bucket in &self.posts {
+            toc.extend_from_slice(&start.to_le_bytes());
+            toc.extend_from_slice(&(bucket.len() as u32).to_le_bytes());
+            for line in bucket {
+                posted.extend_from_slice(&line.to_le_bytes());
+            }
+            start += bucket.len() as u32;
+        }
+        fs::write(out.join(format!("{name}.toc")), toc)?;
+        fs::write(out.join(format!("{name}.ids")), posted)?;
         Ok(())
     }
 }
@@ -166,8 +183,9 @@ fn read_lines(
         let Some(event) = parse::parse_event(text, &[]) else {
             continue;
         };
-        levels.push(&event.level);
-        services.push(&event.service);
+        let line_id = (lines.len() / REC) as u32;
+        levels.push(&event.level, line_id);
+        services.push(&event.service, line_id);
         push_rec(lines, event.ts_ms, file_id, start, n as u32);
     }
     Ok(())
