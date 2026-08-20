@@ -13,6 +13,9 @@ fn main() -> ExitCode {
     if args.first().map(String::as_str) == Some("index") {
         return index_cmd(&args[1..]);
     }
+    if args.first().map(String::as_str) == Some("query") {
+        return query_cmd(&args[1..]);
+    }
     let mut path = None;
     let mut contains = None;
     let mut since = None;
@@ -131,6 +134,41 @@ fn index_cmd(args: &[String]) -> ExitCode {
             println!("{count} lines -> {}", out.display());
             ExitCode::SUCCESS
         }
+        Err(err) => {
+            eprintln!("logq: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn query_cmd(args: &[String]) -> ExitCode {
+    let mut out = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--out" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("usage: logq query -o <index>");
+                    return ExitCode::from(2);
+                };
+                out = Some(PathBuf::from(value));
+                i += 2;
+            }
+            other => {
+                eprintln!("logq: unknown argument {other}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(out) = out else {
+        eprintln!("usage: logq query -o <index>");
+        return ExitCode::from(2);
+    };
+    match index::each_line(&out, |line| {
+        println!("{line}");
+        Ok(())
+    }) {
+        Ok(_) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("logq: {err}");
             ExitCode::from(1)

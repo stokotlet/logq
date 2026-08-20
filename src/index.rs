@@ -84,6 +84,7 @@ pub fn build(input: &Path, out: &Path) -> io::Result<usize> {
     levels.write(out, "level")?;
     services.write(out, "service")?;
     let meta = json!({
+        "root": input.display().to_string(),
         "files": files.iter().map(|file| json!({
             "path": file.path,
             "len": file.len,
@@ -198,6 +199,41 @@ fn push_rec(lines: &mut Vec<u8>, ts_ms: i64, file_id: u32, offset: u64, len: u32
     lines.extend_from_slice(&offset.to_le_bytes());
 }
 
+pub fn each_line(index_dir: &Path, mut on_line: impl FnMut(&str) -> io::Result<()>) -> io::Result<usize> {
+    let meta: serde_json::Value = read_json(&index_dir.join("meta.json"))?;
+    let root = PathBuf::from(meta["root"].as_str().unwrap_or("."));
+    let files = meta["files"]
+        .as_array()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "meta.json has no files"))?;
+    let paths: Vec<String> = files
+        .iter()
+        .map(|file| {
+            file["path"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect();
+    let lines = fs::read(index_dir.join("lines.dat"))?;
+    let count = lines.len() / REC;
+    for id in 0..count {
+        let Some((_ts, file_id, len, offset)) = read_record(&lines, id) else {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated lines.dat"));
+        };
+        let rel = paths.get(file_id as usize).map(String::as_str).unwrap_or("");
+        let line = load_line(&root, rel, offset, len)?;
+        on_line(&line)?;
+    }
+    Ok(count)
+}
+
+fn read_json(path: &Path) -> io::Result<serde_json::Value> {
+    let bytes = fs::read(path).map_err(|err| {
+        io::Error::new(err.kind(), format!("{}: {err}", path.display()))
+    })?;
+    serde_json::from_slice(&bytes).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {err}", path.display())))
+}
+
 pub fn read_record(lines: &[u8], id: usize) -> Option<(i64, u32, u32, u64)> {
     let start = id.checked_mul(REC)?;
     let rec = lines.get(start..start + REC)?;
@@ -267,6 +303,13 @@ mod tests {
         assert_eq!(file_id, 0);
         let line = load_line(&dir, "app.log", offset, len).unwrap();
         assert!(line.contains("nope"), "{line}");
+        let mut printed = String::new();
+        each_line(&out, |line| {
+            printed = line.to_string();
+            Ok(())
+        })
+        .unwrap();
+        assert!(printed.contains("nope"), "{printed}");
         let _ = fs::remove_dir_all(dir);
     }
 }
