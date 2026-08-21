@@ -78,13 +78,22 @@ pub fn build(input: &Path, out: &Path) -> io::Result<usize> {
     let mut lines = Vec::<u8>::new();
     let mut levels = Dict::new();
     let mut services = Dict::new();
-    collect(input, input, out, &mut files, &mut lines, &mut levels, &mut services)?;
+    let base = if input.is_file() {
+        input
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+            .to_path_buf()
+    } else {
+        input.to_path_buf()
+    };
+    collect(&base, input, out, &mut files, &mut lines, &mut levels, &mut services, input.is_file())?;
     let count = lines.len() / REC;
     fs::write(out.join("lines.dat"), &lines)?;
     levels.write(out, "level")?;
     services.write(out, "service")?;
     let meta = json!({
-        "root": input.display().to_string(),
+        "root": base.display().to_string(),
         "files": files.iter().map(|file| json!({
             "path": file.path,
             "len": file.len,
@@ -104,6 +113,7 @@ fn collect(
     lines: &mut Vec<u8>,
     levels: &mut Dict,
     services: &mut Dict,
+    explicit: bool,
 ) -> io::Result<()> {
     let meta = fs::metadata(current)?;
     if meta.is_dir() {
@@ -117,24 +127,14 @@ fn collect(
             if path.file_name().and_then(|name| name.to_str()) == Some(".logq") {
                 continue;
             }
-            collect(root, &path, out, files, lines, levels, services)?;
+            collect(root, &path, out, files, lines, levels, services, false)?;
         }
         return Ok(());
     }
-    if !is_log(current) && root != current {
+    if !explicit && !is_log(current) {
         return Ok(());
     }
-    if root == current && meta.is_dir() {
-        return Ok(());
-    }
-    let rel = if root == current {
-        current
-            .file_name()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| current.to_path_buf())
-    } else {
-        current.strip_prefix(root).unwrap_or(current).to_path_buf()
-    };
+    let rel = current.strip_prefix(root).unwrap_or(current).to_path_buf();
     let file_id = files.len() as u32;
     files.push(Source {
         path: rel.to_string_lossy().into_owned(),
@@ -310,6 +310,25 @@ mod tests {
         })
         .unwrap();
         assert!(printed.contains("nope"), "{printed}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn indexes_a_single_file() {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("logq-one-{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("app.log");
+        fs::write(&log, "{\"ts\":\"2026-08-07T12:00:00Z\",\"level\":\"info\",\"msg\":\"ok\"}\n").unwrap();
+        let out = dir.join("idx");
+        assert_eq!(build(&log, &out).unwrap(), 1);
+        let mut printed = String::new();
+        each_line(&out, |line| {
+            printed = line.to_string();
+            Ok(())
+        })
+        .unwrap();
+        assert!(printed.contains("ok"), "{printed}");
         let _ = fs::remove_dir_all(dir);
     }
 }
