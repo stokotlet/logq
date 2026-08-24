@@ -143,12 +143,21 @@ fn index_cmd(args: &[String]) -> ExitCode {
 
 fn query_cmd(args: &[String]) -> ExitCode {
     let mut out = None;
+    let mut select = index::Select::default();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--since" => match take_time(args, &mut i) {
+                Ok(value) => select.since = Some(value),
+                Err(code) => return code,
+            },
+            "--until" => match take_time(args, &mut i) {
+                Ok(value) => select.until = Some(value),
+                Err(code) => return code,
+            },
             "-o" | "--out" => {
                 let Some(value) = args.get(i + 1) else {
-                    eprintln!("usage: logq query -o <index>");
+                    eprintln!("usage: logq query -o <index> [--since time] [--until time]");
                     return ExitCode::from(2);
                 };
                 out = Some(PathBuf::from(value));
@@ -161,10 +170,10 @@ fn query_cmd(args: &[String]) -> ExitCode {
         }
     }
     let Some(out) = out else {
-        eprintln!("usage: logq query -o <index>");
+        eprintln!("usage: logq query -o <index> [--since time] [--until time]");
         return ExitCode::from(2);
     };
-    match index::each_line(&out, |line| {
+    match index::each_line(&out, &select, |line| {
         println!("{line}");
         Ok(())
     }) {

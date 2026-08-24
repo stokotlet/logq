@@ -199,7 +199,20 @@ fn push_rec(lines: &mut Vec<u8>, ts_ms: i64, file_id: u32, offset: u64, len: u32
     lines.extend_from_slice(&offset.to_le_bytes());
 }
 
-pub fn each_line(index_dir: &Path, mut on_line: impl FnMut(&str) -> io::Result<()>) -> io::Result<usize> {
+#[derive(Default)]
+pub struct Select {
+    pub since: Option<i64>,
+    pub until: Option<i64>,
+    pub level: Option<String>,
+    pub service: Option<String>,
+    pub contains: Option<String>,
+}
+
+pub fn each_line(
+    index_dir: &Path,
+    select: &Select,
+    mut on_line: impl FnMut(&str) -> io::Result<()>,
+) -> io::Result<usize> {
     let meta: serde_json::Value = read_json(&index_dir.join("meta.json"))?;
     let root = PathBuf::from(meta["root"].as_str().unwrap_or("."));
     let files = meta["files"]
@@ -217,9 +230,15 @@ pub fn each_line(index_dir: &Path, mut on_line: impl FnMut(&str) -> io::Result<(
     let lines = fs::read(index_dir.join("lines.dat"))?;
     let count = lines.len() / REC;
     for id in 0..count {
-        let Some((_ts, file_id, len, offset)) = read_record(&lines, id) else {
+        let Some((ts, file_id, len, offset)) = read_record(&lines, id) else {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated lines.dat"));
         };
+        if select.since.is_some_and(|start| ts < start) {
+            continue;
+        }
+        if select.until.is_some_and(|end| ts >= end) {
+            continue;
+        }
         let rel = paths.get(file_id as usize).map(String::as_str).unwrap_or("");
         let line = load_line(&root, rel, offset, len)?;
         on_line(&line)?;
@@ -304,7 +323,7 @@ mod tests {
         let line = load_line(&dir, "app.log", offset, len).unwrap();
         assert!(line.contains("nope"), "{line}");
         let mut printed = String::new();
-        each_line(&out, |line| {
+        each_line(&out, &Select::default(), |line| {
             printed = line.to_string();
             Ok(())
         })
@@ -323,7 +342,7 @@ mod tests {
         let out = dir.join("idx");
         assert_eq!(build(&log, &out).unwrap(), 1);
         let mut printed = String::new();
-        each_line(&out, |line| {
+        each_line(&out, &Select::default(), |line| {
             printed = line.to_string();
             Ok(())
         })
