@@ -147,6 +147,14 @@ fn query_cmd(args: &[String]) -> ExitCode {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--level" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("logq: missing level");
+                    return ExitCode::from(2);
+                };
+                select.level = Some(value.clone());
+                i += 2;
+            }
             "--since" => match take_time(args, &mut i) {
                 Ok(value) => select.since = Some(value),
                 Err(code) => return code,

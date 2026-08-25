@@ -229,8 +229,14 @@ pub fn each_line(
         .collect();
     let lines = fs::read(index_dir.join("lines.dat"))?;
     let count = lines.len() / REC;
-    for id in 0..count {
-        let Some((ts, file_id, len, offset)) = read_record(&lines, id) else {
+    let ids = if let Some(level) = &select.level {
+        lookup(index_dir, "level", level)?
+    } else {
+        (0..count as u32).collect()
+    };
+    let mut hits = 0;
+    for id in ids {
+        let Some((ts, file_id, len, offset)) = read_record(&lines, id as usize) else {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated lines.dat"));
         };
         if select.since.is_some_and(|start| ts < start) {
@@ -242,8 +248,36 @@ pub fn each_line(
         let rel = paths.get(file_id as usize).map(String::as_str).unwrap_or("");
         let line = load_line(&root, rel, offset, len)?;
         on_line(&line)?;
+        hits += 1;
     }
-    Ok(count)
+    Ok(hits)
+}
+
+fn lookup(index_dir: &Path, name: &str, value: &str) -> io::Result<Vec<u32>> {
+    let values = read_json(&index_dir.join(format!("{name}.json")))?;
+    let Some(list) = values.as_array() else {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("bad {name}.json")));
+    };
+    let Some(pos) = list.iter().position(|item| item.as_str() == Some(value)) else {
+        return Ok(Vec::new());
+    };
+    let toc = fs::read(index_dir.join(format!("{name}.toc")))?;
+    let ids = fs::read(index_dir.join(format!("{name}.ids")))?;
+    let at = pos * 8;
+    let toc_bytes = toc.get(at..at + 8).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("bad {name}.toc"))
+    })?;
+    let start = u32::from_le_bytes(toc_bytes[0..4].try_into().unwrap());
+    let count = u32::from_le_bytes(toc_bytes[4..8].try_into().unwrap());
+    let mut out = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let off = (start as usize + i as usize) * 4;
+        let bytes = ids.get(off..off + 4).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("bad {name}.ids"))
+        })?;
+        out.push(u32::from_le_bytes(bytes.try_into().unwrap()));
+    }
+    Ok(out)
 }
 
 fn read_json(path: &Path) -> io::Result<serde_json::Value> {
