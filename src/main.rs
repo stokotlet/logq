@@ -147,6 +147,14 @@ fn query_cmd(args: &[String]) -> ExitCode {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--service" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("logq: missing service");
+                    return ExitCode::from(2);
+                };
+                select.service = Some(value.clone());
+                i += 2;
+            }
             "--level" => {
                 let Some(value) = args.get(i + 1) else {
                     eprintln!("logq: missing level");

@@ -229,11 +229,19 @@ pub fn each_line(
         .collect();
     let lines = fs::read(index_dir.join("lines.dat"))?;
     let count = lines.len() / REC;
-    let ids = if let Some(level) = &select.level {
-        lookup(index_dir, "level", level)?
+    let mut chosen = if let Some(level) = &select.level {
+        Some(lookup(index_dir, "level", level)?)
     } else {
-        (0..count as u32).collect()
+        None
     };
+    if let Some(service) = &select.service {
+        let extra = lookup(index_dir, "service", service)?;
+        chosen = Some(match chosen {
+            Some(have) => intersect(&have, &extra),
+            None => extra,
+        });
+    }
+    let ids = chosen.unwrap_or_else(|| (0..count as u32).collect());
     let mut hits = 0;
     for id in ids {
         let Some((ts, file_id, len, offset)) = read_record(&lines, id as usize) else {
@@ -251,6 +259,24 @@ pub fn each_line(
         hits += 1;
     }
     Ok(hits)
+}
+
+fn intersect(left: &[u32], right: &[u32]) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut j = 0;
+    while i < left.len() && j < right.len() {
+        match left[i].cmp(&right[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                out.push(left[i]);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    out
 }
 
 fn lookup(index_dir: &Path, name: &str, value: &str) -> io::Result<Vec<u32>> {
