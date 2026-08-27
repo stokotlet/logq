@@ -456,4 +456,39 @@ mod tests {
         assert!(printed.contains("ok"), "{printed}");
         let _ = fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn filters_by_field_and_text() {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("logq-filter-{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("app.log"),
+            concat!(
+                "{\"ts\":\"2026-08-07T12:00:00Z\",\"level\":\"error\",\"service\":\"checkout\",\"status\":500,\"msg\":\"declined\"}\n",
+                "{\"ts\":\"2026-08-07T12:05:00Z\",\"level\":\"error\",\"service\":\"checkout\",\"status\":500,\"msg\":\"timeout\"}\n",
+                "{\"ts\":\"2026-08-07T12:06:00Z\",\"level\":\"info\",\"service\":\"api\",\"status\":200,\"msg\":\"ok\"}\n",
+            ),
+        )
+        .unwrap();
+        let out = dir.join("idx");
+        let fields = vec!["status".to_string()];
+        build(&dir, &out, &fields).unwrap();
+        let select = Select {
+            level: Some("error".to_string()),
+            service: Some("checkout".to_string()),
+            contains: Some("declined".to_string()),
+            equals: vec![("status".to_string(), "500".to_string())],
+            ..Select::default()
+        };
+        let mut hits = Vec::new();
+        each_line(&out, &select, |line| {
+            hits.push(line.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].contains("declined"));
+        let _ = fs::remove_dir_all(dir);
+    }
 }
