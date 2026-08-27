@@ -72,12 +72,13 @@ struct Source {
     mtime: i64,
 }
 
-pub fn build(input: &Path, out: &Path) -> io::Result<usize> {
+pub fn build(input: &Path, out: &Path, fields: &[String]) -> io::Result<usize> {
     fs::create_dir_all(out)?;
     let mut files = Vec::new();
     let mut lines = Vec::<u8>::new();
     let mut levels = Dict::new();
     let mut services = Dict::new();
+    let mut extras: Vec<Dict> = fields.iter().map(|_| Dict::new()).collect();
     let base = if input.is_file() {
         input
             .parent()
@@ -87,11 +88,25 @@ pub fn build(input: &Path, out: &Path) -> io::Result<usize> {
     } else {
         input.to_path_buf()
     };
-    collect(&base, input, out, &mut files, &mut lines, &mut levels, &mut services, input.is_file())?;
+    collect(
+        &base,
+        input,
+        out,
+        &mut files,
+        &mut lines,
+        &mut levels,
+        &mut services,
+        &mut extras,
+        fields,
+        input.is_file(),
+    )?;
     let count = lines.len() / REC;
     fs::write(out.join("lines.dat"), &lines)?;
     levels.write(out, "level")?;
     services.write(out, "service")?;
+    for (i, extra) in extras.iter().enumerate() {
+        extra.write(out, &format!("extra_{i}"))?;
+    }
     let meta = json!({
         "root": base.display().to_string(),
         "files": files.iter().map(|file| json!({
@@ -100,6 +115,7 @@ pub fn build(input: &Path, out: &Path) -> io::Result<usize> {
             "mtime": file.mtime,
         })).collect::<Vec<_>>(),
         "lines": count,
+        "fields": fields,
     });
     fs::write(out.join("meta.json"), serde_json::to_vec_pretty(&meta).unwrap())?;
     Ok(count)
@@ -113,6 +129,8 @@ fn collect(
     lines: &mut Vec<u8>,
     levels: &mut Dict,
     services: &mut Dict,
+    extras: &mut [Dict],
+    fields: &[String],
     explicit: bool,
 ) -> io::Result<()> {
     let meta = fs::metadata(current)?;
@@ -127,7 +145,7 @@ fn collect(
             if path.file_name().and_then(|name| name.to_str()) == Some(".logq") {
                 continue;
             }
-            collect(root, &path, out, files, lines, levels, services, false)?;
+            collect(root, &path, out, files, lines, levels, services, extras, fields, false)?;
         }
         return Ok(());
     }
@@ -141,7 +159,7 @@ fn collect(
         len: meta.len(),
         mtime: meta.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0),
     });
-    read_lines(current, file_id, lines, levels, services)?;
+    read_lines(current, file_id, lines, levels, services, extras, fields)?;
     Ok(())
 }
 
@@ -161,6 +179,8 @@ fn read_lines(
     lines: &mut Vec<u8>,
     levels: &mut Dict,
     services: &mut Dict,
+    extras: &mut [Dict],
+    fields: &[String],
 ) -> io::Result<()> {
     let file = File::open(path)?;
     let reader: Box<dyn BufRead> = if scan::is_gzip(path) {
@@ -181,12 +201,15 @@ fn read_lines(
         offset += n as u64;
         let text = String::from_utf8_lossy(&buf);
         let text = text.trim_end_matches(['\r', '\n']);
-        let Some(event) = parse::parse_event(text, &[]) else {
+        let Some(event) = parse::parse_event(text, fields) else {
             continue;
         };
         let line_id = (lines.len() / REC) as u32;
         levels.push(&event.level, line_id);
         services.push(&event.service, line_id);
+        for (dict, value) in extras.iter_mut().zip(&event.extra) {
+            dict.push(value, line_id);
+        }
         push_rec(lines, event.ts_ms, file_id, start, n as u32);
     }
     Ok(())
@@ -206,6 +229,7 @@ pub struct Select {
     pub level: Option<String>,
     pub service: Option<String>,
     pub contains: Option<String>,
+    pub equals: Vec<(String, String)>,
 }
 
 pub fn each_line(
@@ -241,6 +265,14 @@ pub fn each_line(
             None => extra,
         });
     }
+    for (name, value) in &select.equals {
+        let key = extra_key(index_dir, name)?;
+        let extra = lookup(index_dir, &key, value)?;
+        chosen = Some(match chosen {
+            Some(have) => intersect(&have, &extra),
+            None => extra,
+        });
+    }
     let ids = chosen.unwrap_or_else(|| (0..count as u32).collect());
     let mut hits = 0;
     for id in ids {
@@ -255,10 +287,24 @@ pub fn each_line(
         }
         let rel = paths.get(file_id as usize).map(String::as_str).unwrap_or("");
         let line = load_line(&root, rel, offset, len)?;
+        if select.contains.as_ref().is_some_and(|text| !line.contains(text)) {
+            continue;
+        }
         on_line(&line)?;
         hits += 1;
     }
     Ok(hits)
+}
+
+fn extra_key(index_dir: &Path, name: &str) -> io::Result<String> {
+    let meta = read_json(&index_dir.join("meta.json"))?;
+    let Some(fields) = meta["fields"].as_array() else {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "index has no fields"));
+    };
+    let Some(pos) = fields.iter().position(|field| field.as_str() == Some(name)) else {
+        return Err(io::Error::other(format!("field {name} was not indexed")));
+    };
+    Ok(format!("extra_{pos}"))
 }
 
 fn intersect(left: &[u32], right: &[u32]) -> Vec<u32> {
@@ -372,7 +418,7 @@ mod tests {
         )
         .unwrap();
         let out = dir.join("idx");
-        let count = build(&dir, &out).unwrap();
+        let count = build(&dir, &out, &[]).unwrap();
         assert_eq!(count, 1);
         let levels: Vec<String> = serde_json::from_slice(&fs::read(out.join("level.json")).unwrap()).unwrap();
         assert_eq!(levels, vec!["error".to_string()]);
@@ -400,7 +446,7 @@ mod tests {
         let log = dir.join("app.log");
         fs::write(&log, "{\"ts\":\"2026-08-07T12:00:00Z\",\"level\":\"info\",\"msg\":\"ok\"}\n").unwrap();
         let out = dir.join("idx");
-        assert_eq!(build(&log, &out).unwrap(), 1);
+        assert_eq!(build(&log, &out, &[]).unwrap(), 1);
         let mut printed = String::new();
         each_line(&out, &Select::default(), |line| {
             printed = line.to_string();

@@ -97,12 +97,21 @@ fn main() -> ExitCode {
 fn index_cmd(args: &[String]) -> ExitCode {
     let mut input = None;
     let mut out = None;
+    let mut fields = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--field" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("logq: missing field");
+                    return ExitCode::from(2);
+                };
+                fields.push(value.clone());
+                i += 2;
+            }
             "-o" | "--out" => {
                 let Some(value) = args.get(i + 1) else {
-                    eprintln!("usage: logq index <path> [-o dir]");
+                    eprintln!("usage: logq index <path> [-o dir] [--field name]");
                     return ExitCode::from(2);
                 };
                 out = Some(PathBuf::from(value));
@@ -129,7 +138,7 @@ fn index_cmd(args: &[String]) -> ExitCode {
             PathBuf::from(".logq")
         }
     });
-    match index::build(&input, &out) {
+    match index::build(&input, &out, &fields) {
         Ok(count) => {
             println!("{count} lines -> {}", out.display());
             ExitCode::SUCCESS
@@ -147,6 +156,26 @@ fn query_cmd(args: &[String]) -> ExitCode {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--contains" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("logq: missing text");
+                    return ExitCode::from(2);
+                };
+                select.contains = Some(value.clone());
+                i += 2;
+            }
+            "--field" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("logq: missing field");
+                    return ExitCode::from(2);
+                };
+                let Some((name, wanted)) = value.split_once('=') else {
+                    eprintln!("logq: field must look like name=value");
+                    return ExitCode::from(2);
+                };
+                select.equals.push((name.to_string(), wanted.to_string()));
+                i += 2;
+            }
             "--service" => {
                 let Some(value) = args.get(i + 1) else {
                     eprintln!("logq: missing service");
