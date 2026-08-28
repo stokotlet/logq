@@ -73,12 +73,6 @@ struct Source {
 }
 
 pub fn build(input: &Path, out: &Path, fields: &[String]) -> io::Result<usize> {
-    fs::create_dir_all(out)?;
-    let mut files = Vec::new();
-    let mut lines = Vec::<u8>::new();
-    let mut levels = Dict::new();
-    let mut services = Dict::new();
-    let mut extras: Vec<Dict> = fields.iter().map(|_| Dict::new()).collect();
     let base = if input.is_file() {
         input
             .parent()
@@ -88,6 +82,15 @@ pub fn build(input: &Path, out: &Path, fields: &[String]) -> io::Result<usize> {
     } else {
         input.to_path_buf()
     };
+    if let Some(count) = reuse(&base, input, out, fields) {
+        return Ok(count);
+    }
+    fs::create_dir_all(out)?;
+    let mut files = Vec::new();
+    let mut lines = Vec::<u8>::new();
+    let mut levels = Dict::new();
+    let mut services = Dict::new();
+    let mut extras: Vec<Dict> = fields.iter().map(|_| Dict::new()).collect();
     collect(
         &base,
         input,
@@ -117,8 +120,83 @@ pub fn build(input: &Path, out: &Path, fields: &[String]) -> io::Result<usize> {
         "lines": count,
         "fields": fields,
     });
-    fs::write(out.join("meta.json"), serde_json::to_vec_pretty(&meta).unwrap())?;
+    fs::write(
+        out.join("meta.json"),
+        serde_json::to_vec_pretty(&meta).unwrap(),
+    )?;
     Ok(count)
+}
+
+fn reuse(base: &Path, input: &Path, out: &Path, fields: &[String]) -> Option<usize> {
+    let meta = read_json(&out.join("meta.json")).ok()?;
+    let saved_fields: Vec<&str> = meta
+        .get("fields")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let wanted: Vec<&str> = fields.iter().map(String::as_str).collect();
+    if saved_fields != wanted || meta.get("root")?.as_str()? != base.display().to_string() {
+        return None;
+    }
+    let saved = meta.get("files")?.as_array()?;
+    let mut found = Vec::new();
+    list_files(base, input, out, &mut found, input.is_file()).ok()?;
+    if found.len() != saved.len() {
+        return None;
+    }
+    for (got, prev) in found.iter().zip(saved) {
+        if prev.get("path")?.as_str()? != got.path
+            || prev.get("len")?.as_u64()? != got.len
+            || prev.get("mtime")?.as_i64()? != got.mtime
+        {
+            return None;
+        }
+    }
+    Some(meta.get("lines")?.as_u64()? as usize)
+}
+
+fn list_files(
+    root: &Path,
+    current: &Path,
+    out: &Path,
+    files: &mut Vec<Source>,
+    explicit: bool,
+) -> io::Result<()> {
+    let meta = fs::metadata(current)?;
+    if meta.is_dir() {
+        if current == out {
+            return Ok(());
+        }
+        let mut entries = fs::read_dir(current)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            if path.file_name().and_then(|name| name.to_str()) == Some(".logq") {
+                continue;
+            }
+            list_files(root, &path, out, files, false)?;
+        }
+        return Ok(());
+    }
+    if !explicit && !is_log(current) {
+        return Ok(());
+    }
+    let rel = current.strip_prefix(root).unwrap_or(current);
+    files.push(Source {
+        path: rel.to_string_lossy().into_owned(),
+        len: meta.len(),
+        mtime: mtime_secs(&meta),
+    });
+    Ok(())
+}
+
+fn mtime_secs(meta: &fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn collect(
@@ -145,7 +223,9 @@ fn collect(
             if path.file_name().and_then(|name| name.to_str()) == Some(".logq") {
                 continue;
             }
-            collect(root, &path, out, files, lines, levels, services, extras, fields, false)?;
+            collect(
+                root, &path, out, files, lines, levels, services, extras, fields, false,
+            )?;
         }
         return Ok(());
     }
@@ -157,7 +237,7 @@ fn collect(
     files.push(Source {
         path: rel.to_string_lossy().into_owned(),
         len: meta.len(),
-        mtime: meta.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0),
+        mtime: mtime_secs(&meta),
     });
     read_lines(current, file_id, lines, levels, services, extras, fields)?;
     Ok(())
@@ -244,12 +324,7 @@ pub fn each_line(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "meta.json has no files"))?;
     let paths: Vec<String> = files
         .iter()
-        .map(|file| {
-            file["path"]
-                .as_str()
-                .unwrap_or("")
-                .to_string()
-        })
+        .map(|file| file["path"].as_str().unwrap_or("").to_string())
         .collect();
     let lines = fs::read(index_dir.join("lines.dat"))?;
     let count = lines.len() / REC;
@@ -277,7 +352,10 @@ pub fn each_line(
     let mut hits = 0;
     for id in ids {
         let Some((ts, file_id, len, offset)) = read_record(&lines, id as usize) else {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated lines.dat"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated lines.dat",
+            ));
         };
         if select.since.is_some_and(|start| ts < start) {
             continue;
@@ -285,9 +363,16 @@ pub fn each_line(
         if select.until.is_some_and(|end| ts >= end) {
             continue;
         }
-        let rel = paths.get(file_id as usize).map(String::as_str).unwrap_or("");
+        let rel = paths
+            .get(file_id as usize)
+            .map(String::as_str)
+            .unwrap_or("");
         let line = load_line(&root, rel, offset, len)?;
-        if select.contains.as_ref().is_some_and(|text| !line.contains(text)) {
+        if select
+            .contains
+            .as_ref()
+            .is_some_and(|text| !line.contains(text))
+        {
             continue;
         }
         on_line(&line)?;
@@ -299,7 +384,10 @@ pub fn each_line(
 fn extra_key(index_dir: &Path, name: &str) -> io::Result<String> {
     let meta = read_json(&index_dir.join("meta.json"))?;
     let Some(fields) = meta["fields"].as_array() else {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "index has no fields"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "index has no fields",
+        ));
     };
     let Some(pos) = fields.iter().position(|field| field.as_str() == Some(name)) else {
         return Err(io::Error::other(format!("field {name} was not indexed")));
@@ -328,7 +416,10 @@ fn intersect(left: &[u32], right: &[u32]) -> Vec<u32> {
 fn lookup(index_dir: &Path, name: &str, value: &str) -> io::Result<Vec<u32>> {
     let values = read_json(&index_dir.join(format!("{name}.json")))?;
     let Some(list) = values.as_array() else {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("bad {name}.json")));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("bad {name}.json"),
+        ));
     };
     let Some(pos) = list.iter().position(|item| item.as_str() == Some(value)) else {
         return Ok(Vec::new());
@@ -336,27 +427,31 @@ fn lookup(index_dir: &Path, name: &str, value: &str) -> io::Result<Vec<u32>> {
     let toc = fs::read(index_dir.join(format!("{name}.toc")))?;
     let ids = fs::read(index_dir.join(format!("{name}.ids")))?;
     let at = pos * 8;
-    let toc_bytes = toc.get(at..at + 8).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("bad {name}.toc"))
-    })?;
+    let toc_bytes = toc
+        .get(at..at + 8)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("bad {name}.toc")))?;
     let start = u32::from_le_bytes(toc_bytes[0..4].try_into().unwrap());
     let count = u32::from_le_bytes(toc_bytes[4..8].try_into().unwrap());
     let mut out = Vec::with_capacity(count as usize);
     for i in 0..count {
         let off = (start as usize + i as usize) * 4;
-        let bytes = ids.get(off..off + 4).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("bad {name}.ids"))
-        })?;
+        let bytes = ids
+            .get(off..off + 4)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("bad {name}.ids")))?;
         out.push(u32::from_le_bytes(bytes.try_into().unwrap()));
     }
     Ok(out)
 }
 
 fn read_json(path: &Path) -> io::Result<serde_json::Value> {
-    let bytes = fs::read(path).map_err(|err| {
-        io::Error::new(err.kind(), format!("{}: {err}", path.display()))
-    })?;
-    serde_json::from_slice(&bytes).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {err}", path.display())))
+    let bytes = fs::read(path)
+        .map_err(|err| io::Error::new(err.kind(), format!("{}: {err}", path.display())))?;
+    serde_json::from_slice(&bytes).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: {err}", path.display()),
+        )
+    })
 }
 
 pub fn read_record(lines: &[u8], id: usize) -> Option<(i64, u32, u32, u64)> {
@@ -409,7 +504,10 @@ mod tests {
 
     #[test]
     fn writes_line_table() {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let dir = std::env::temp_dir().join(format!("logq-lines-{nanos}"));
         fs::create_dir_all(&dir).unwrap();
         fs::write(
@@ -420,7 +518,8 @@ mod tests {
         let out = dir.join("idx");
         let count = build(&dir, &out, &[]).unwrap();
         assert_eq!(count, 1);
-        let levels: Vec<String> = serde_json::from_slice(&fs::read(out.join("level.json")).unwrap()).unwrap();
+        let levels: Vec<String> =
+            serde_json::from_slice(&fs::read(out.join("level.json")).unwrap()).unwrap();
         assert_eq!(levels, vec!["error".to_string()]);
         let bytes = fs::read(out.join("lines.dat")).unwrap();
         let (ts, file_id, len, offset) = read_record(&bytes, 0).unwrap();
@@ -440,11 +539,18 @@ mod tests {
 
     #[test]
     fn indexes_a_single_file() {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let dir = std::env::temp_dir().join(format!("logq-one-{nanos}"));
         fs::create_dir_all(&dir).unwrap();
         let log = dir.join("app.log");
-        fs::write(&log, "{\"ts\":\"2026-08-07T12:00:00Z\",\"level\":\"info\",\"msg\":\"ok\"}\n").unwrap();
+        fs::write(
+            &log,
+            "{\"ts\":\"2026-08-07T12:00:00Z\",\"level\":\"info\",\"msg\":\"ok\"}\n",
+        )
+        .unwrap();
         let out = dir.join("idx");
         assert_eq!(build(&log, &out, &[]).unwrap(), 1);
         let mut printed = String::new();
@@ -459,7 +565,10 @@ mod tests {
 
     #[test]
     fn filters_by_field_and_text() {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let dir = std::env::temp_dir().join(format!("logq-filter-{nanos}"));
         fs::create_dir_all(&dir).unwrap();
         fs::write(
@@ -489,6 +598,17 @@ mod tests {
         .unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].contains("declined"));
+        let before = fs::metadata(out.join("lines.dat"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        build(&dir, &out, &fields).unwrap();
+        let after = fs::metadata(out.join("lines.dat"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(before, after);
         let _ = fs::remove_dir_all(dir);
     }
 }
