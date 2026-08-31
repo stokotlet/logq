@@ -312,6 +312,32 @@ pub struct Select {
     pub equals: Vec<(String, String)>,
 }
 
+pub fn counts(index_dir: &Path, by: &str) -> io::Result<Vec<(String, usize)>> {
+    if by != "level" && by != "service" {
+        return Err(io::Error::other(format!("can't count by {by}")));
+    }
+    let values = read_json(&index_dir.join(format!("{by}.json")))?;
+    let Some(list) = values.as_array() else {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("bad {by}.json")));
+    };
+    let toc = fs::read(index_dir.join(format!("{by}.toc")))?;
+    let mut rows = Vec::new();
+    for (i, value) in list.iter().enumerate() {
+        let at = i * 8 + 4;
+        let bytes = toc.get(at..at + 4).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("bad {by}.toc"))
+        })?;
+        let count = u32::from_le_bytes(bytes.try_into().unwrap()) as usize;
+        if count == 0 {
+            continue;
+        }
+        let label = value.as_str().unwrap_or("").to_string();
+        rows.push((label, count));
+    }
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(rows)
+}
+
 pub fn each_line(
     index_dir: &Path,
     select: &Select,

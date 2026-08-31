@@ -3,7 +3,10 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
-pub fn for_each_line(path: &Path, mut on_line: impl FnMut(&str) -> io::Result<()>) -> io::Result<()> {
+pub fn for_each_line(
+    path: &Path,
+    mut on_line: impl FnMut(&str) -> io::Result<()>,
+) -> io::Result<()> {
     let meta = fs::metadata(path)?;
     if meta.is_dir() {
         walk(path, &mut on_line)
