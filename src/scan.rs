@@ -32,7 +32,7 @@ fn walk(dir: &Path, on_line: &mut impl FnMut(&str) -> io::Result<()>) -> io::Res
     Ok(())
 }
 
-fn is_log(path: &Path) -> bool {
+pub(crate) fn is_log(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
