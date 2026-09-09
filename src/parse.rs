@@ -63,6 +63,9 @@ pub fn parse_time(text: &str) -> Option<i64> {
     if text.is_empty() {
         return None;
     }
+    if let Ok(number) = text.parse::<i64>() {
+        return Some(normalize_epoch(number));
+    }
     if let Ok(dt) = DateTime::parse_from_rfc3339(text) {
         return Some(dt.timestamp_millis());
     }
@@ -101,6 +104,8 @@ mod tests {
         assert_eq!(zulu, plus);
         let spaced = parse_time("2026-08-07 12:00:00Z").unwrap();
         assert_eq!(zulu, spaced);
+        assert_eq!(parse_time("1786104000").unwrap(), zulu);
+        assert_eq!(parse_time("1786104000000").unwrap(), zulu);
     }
 
     #[test]
