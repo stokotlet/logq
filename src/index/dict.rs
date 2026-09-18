@@ -6,7 +6,6 @@ use std::path::Path;
 pub(crate) struct Dict {
     to_id: HashMap<String, u32>,
     values: Vec<String>,
-    ids: Vec<u32>,
     posts: Vec<Vec<u32>>,
 }
 
@@ -15,14 +14,13 @@ impl Dict {
         Self {
             to_id: HashMap::new(),
             values: Vec::new(),
-            ids: Vec::new(),
             posts: Vec::new(),
         }
     }
 
     pub(crate) fn push(&mut self, value: &str, line: u32) {
-        let id = if let Some(id) = self.to_id.get(value) {
-            *id
+        let id = if let Some(&id) = self.to_id.get(value) {
+            id
         } else {
             let id = self.values.len() as u32;
             self.to_id.insert(value.to_string(), id);
@@ -30,18 +28,12 @@ impl Dict {
             self.posts.push(Vec::new());
             id
         };
-        self.ids.push(id);
         self.posts[id as usize].push(line);
     }
 
     pub(crate) fn write(&self, out: &Path, name: &str) -> io::Result<()> {
         let listed = serde_json::to_vec_pretty(&self.values).map_err(io::Error::other)?;
         fs::write(out.join(format!("{name}.json")), listed)?;
-        let mut col = Vec::with_capacity(self.ids.len() * 4);
-        for id in &self.ids {
-            col.extend_from_slice(&id.to_le_bytes());
-        }
-        fs::write(out.join(format!("{name}.col")), col)?;
         let mut toc = Vec::new();
         let mut posted = Vec::new();
         let mut start = 0u32;

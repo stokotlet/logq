@@ -2,16 +2,22 @@ use super::build::build;
 use super::query::{Select, each_line};
 use super::record::{load_line, read_record};
 use std::fs;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[test]
-fn writes_line_table() {
+fn tmp(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("logq-lines-{nanos}"));
+    let dir = std::env::temp_dir().join(format!("logq-{label}-{nanos}"));
     fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn writes_line_table() {
+    let dir = tmp("lines");
     fs::write(
         dir.join("app.log"),
         "{\"ts\":\"2026-08-07T12:00:00Z\",\"level\":\"error\",\"msg\":\"nope\"}\nnot json\n",
@@ -41,12 +47,7 @@ fn writes_line_table() {
 
 #[test]
 fn indexes_a_single_file() {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("logq-one-{nanos}"));
-    fs::create_dir_all(&dir).unwrap();
+    let dir = tmp("one");
     let log = dir.join("app.log");
     fs::write(
         &log,
@@ -67,12 +68,7 @@ fn indexes_a_single_file() {
 
 #[test]
 fn filters_by_field_and_text() {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("logq-filter-{nanos}"));
-    fs::create_dir_all(&dir).unwrap();
+    let dir = tmp("filter");
     fs::write(
         dir.join("app.log"),
         concat!(

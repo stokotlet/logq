@@ -59,25 +59,16 @@ pub fn each_line(
         .collect();
     let lines = fs::read(index_dir.join("lines.dat"))?;
     let count = lines.len() / REC;
-    let mut chosen = if let Some(level) = &select.level {
-        Some(lookup(index_dir, "level", level)?)
-    } else {
-        None
-    };
+    let mut chosen = None;
+    if let Some(level) = &select.level {
+        chosen = narrow(chosen, lookup(index_dir, "level", level)?);
+    }
     if let Some(service) = &select.service {
-        let extra = lookup(index_dir, "service", service)?;
-        chosen = Some(match chosen {
-            Some(have) => intersect(&have, &extra),
-            None => extra,
-        });
+        chosen = narrow(chosen, lookup(index_dir, "service", service)?);
     }
     for (name, value) in &select.equals {
         let key = extra_key(index_dir, name)?;
-        let extra = lookup(index_dir, &key, value)?;
-        chosen = Some(match chosen {
-            Some(have) => intersect(&have, &extra),
-            None => extra,
-        });
+        chosen = narrow(chosen, lookup(index_dir, &key, value)?);
     }
     let ids = chosen.unwrap_or_else(|| (0..count as u32).collect());
     let mut hits = 0;
@@ -124,6 +115,13 @@ fn extra_key(index_dir: &Path, name: &str) -> io::Result<String> {
         return Err(io::Error::other(format!("field {name} was not indexed")));
     };
     Ok(format!("extra_{pos}"))
+}
+
+fn narrow(chosen: Option<Vec<u32>>, extra: Vec<u32>) -> Option<Vec<u32>> {
+    Some(match chosen {
+        Some(have) => intersect(&have, &extra),
+        None => extra,
+    })
 }
 
 fn intersect(left: &[u32], right: &[u32]) -> Vec<u32> {

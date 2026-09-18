@@ -18,7 +18,7 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
             }
             "-o" | "--out" => {
                 let Some(value) = args.get(i + 1) else {
-                    eprintln!("usage: logq stats -o <index> [--by level]");
+                    eprintln!("usage: logq stats -o <index> [--by level|service]");
                     return ExitCode::from(2);
                 };
                 out = Some(PathBuf::from(value));
@@ -31,7 +31,7 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
         }
     }
     let Some(out) = out else {
-        eprintln!("usage: logq stats -o <index> [--by level]");
+        eprintln!("usage: logq stats -o <index> [--by level|service]");
         return ExitCode::from(2);
     };
     match index::counts(&out, &by) {

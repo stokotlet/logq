@@ -1,12 +1,11 @@
 use super::dict::Dict;
-use super::files::{self, Source};
+use super::files;
 use super::record::{self, REC};
 use crate::parse;
 use crate::scan;
-use flate2::read::GzDecoder;
 use serde_json::json;
-use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader};
+use std::fs;
+use std::io::{self, BufRead};
 use std::path::Path;
 
 pub fn build(input: &Path, out: &Path, fields: &[String]) -> io::Result<usize> {
@@ -24,22 +23,22 @@ pub fn build(input: &Path, out: &Path, fields: &[String]) -> io::Result<usize> {
     }
     fs::create_dir_all(out)?;
     let mut files = Vec::new();
+    files::list_files(&base, input, out, &mut files, input.is_file())?;
     let mut lines = Vec::<u8>::new();
     let mut levels = Dict::new();
     let mut services = Dict::new();
     let mut extras: Vec<Dict> = fields.iter().map(|_| Dict::new()).collect();
-    collect(
-        &base,
-        input,
-        out,
-        &mut files,
-        &mut lines,
-        &mut levels,
-        &mut services,
-        &mut extras,
-        fields,
-        input.is_file(),
-    )?;
+    for (file_id, source) in files.iter().enumerate() {
+        read_lines(
+            &base.join(&source.path),
+            file_id as u32,
+            &mut lines,
+            &mut levels,
+            &mut services,
+            &mut extras,
+            fields,
+        )?;
+    }
     let count = lines.len() / REC;
     fs::write(out.join("lines.dat"), &lines)?;
     levels.write(out, "level")?;
@@ -57,10 +56,8 @@ pub fn build(input: &Path, out: &Path, fields: &[String]) -> io::Result<usize> {
         "lines": count,
         "fields": fields,
     });
-    fs::write(
-        out.join("meta.json"),
-        serde_json::to_vec_pretty(&meta).unwrap(),
-    )?;
+    let body = serde_json::to_vec_pretty(&meta).map_err(io::Error::other)?;
+    fs::write(out.join("meta.json"), body)?;
     Ok(count)
 }
 
@@ -93,50 +90,6 @@ fn reuse(base: &Path, input: &Path, out: &Path, fields: &[String]) -> Option<usi
     Some(meta.get("lines")?.as_u64()? as usize)
 }
 
-fn collect(
-    root: &Path,
-    current: &Path,
-    out: &Path,
-    files: &mut Vec<Source>,
-    lines: &mut Vec<u8>,
-    levels: &mut Dict,
-    services: &mut Dict,
-    extras: &mut [Dict],
-    fields: &[String],
-    explicit: bool,
-) -> io::Result<()> {
-    let meta = fs::metadata(current)?;
-    if meta.is_dir() {
-        if current == out {
-            return Ok(());
-        }
-        let mut entries = fs::read_dir(current)?.collect::<Result<Vec<_>, _>>()?;
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            let path = entry.path();
-            if path.file_name().and_then(|name| name.to_str()) == Some(".logq") {
-                continue;
-            }
-            collect(
-                root, &path, out, files, lines, levels, services, extras, fields, false,
-            )?;
-        }
-        return Ok(());
-    }
-    if !explicit && !scan::is_log(current) {
-        return Ok(());
-    }
-    let rel = current.strip_prefix(root).unwrap_or(current).to_path_buf();
-    let file_id = files.len() as u32;
-    files.push(Source {
-        path: rel.to_string_lossy().into_owned(),
-        len: meta.len(),
-        mtime: files::mtime_secs(&meta),
-    });
-    read_lines(current, file_id, lines, levels, services, extras, fields)?;
-    Ok(())
-}
-
 fn read_lines(
     path: &Path,
     file_id: u32,
@@ -146,13 +99,7 @@ fn read_lines(
     extras: &mut [Dict],
     fields: &[String],
 ) -> io::Result<()> {
-    let file = File::open(path)?;
-    let reader: Box<dyn BufRead> = if scan::is_gzip(path) {
-        Box::new(BufReader::new(GzDecoder::new(file)))
-    } else {
-        Box::new(BufReader::new(file))
-    };
-    let mut reader = reader;
+    let mut reader = scan::open(path)?;
     let mut buf = Vec::new();
     let mut offset = 0u64;
     loop {

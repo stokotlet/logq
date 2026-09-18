@@ -43,18 +43,21 @@ pub(crate) fn is_log(path: &Path) -> bool {
 }
 
 fn read_file(path: &Path, on_line: &mut impl FnMut(&str) -> io::Result<()>) -> io::Result<()> {
-    let file = File::open(path)?;
-    let reader: Box<dyn BufRead> = if is_gzip(path) {
-        Box::new(BufReader::new(GzDecoder::new(file)))
-    } else {
-        Box::new(BufReader::new(file))
-    };
-    for line in reader.lines() {
+    for line in open(path)?.lines() {
         on_line(&line?)?;
     }
     Ok(())
 }
 
-pub fn is_gzip(path: &Path) -> bool {
+pub(crate) fn open(path: &Path) -> io::Result<Box<dyn BufRead>> {
+    let file = File::open(path)?;
+    if is_gzip(path) {
+        Ok(Box::new(BufReader::new(GzDecoder::new(file))))
+    } else {
+        Ok(Box::new(BufReader::new(file)))
+    }
+}
+
+pub(crate) fn is_gzip(path: &Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()) == Some("gz")
 }

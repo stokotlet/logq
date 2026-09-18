@@ -1,12 +1,11 @@
 use chrono::DateTime;
 use serde_json::{Map, Value};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Event {
     pub ts_ms: i64,
     pub level: String,
     pub service: String,
-    pub msg: String,
     pub extra: Vec<String>,
 }
 
@@ -18,7 +17,6 @@ pub fn parse_event(line: &str, extra_keys: &[String]) -> Option<Event> {
         ts_ms,
         level: field(obj, &["level", "lvl", "severity"]),
         service: field(obj, &["service", "svc", "logger"]),
-        msg: field(obj, &["msg", "message"]),
         extra: extra_keys
             .iter()
             .map(|key| field(obj, &[key.as_str()]))
@@ -76,6 +74,7 @@ pub fn parse_time(text: &str) -> Option<i64> {
 }
 
 fn normalize_epoch(number: i64) -> i64 {
+    // 10 digits is still seconds. Past that, treat it as milliseconds.
     if number.abs() >= 10_000_000_000 {
         number
     } else {
@@ -93,7 +92,6 @@ mod tests {
         let event = parse_event(line, &[]).unwrap();
         assert_eq!(event.level, "error");
         assert_eq!(event.service, "checkout");
-        assert_eq!(event.msg, "declined");
         assert_eq!(event.ts_ms, 1_786_104_000_000);
     }
 

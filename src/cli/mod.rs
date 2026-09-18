@@ -1,6 +1,6 @@
-mod index_cmd;
-mod query_cmd;
-mod stats_cmd;
+mod index;
+mod query;
+mod stats;
 
 use crate::parse;
 use crate::scan;
@@ -13,13 +13,13 @@ use std::process::ExitCode;
 pub(crate) fn run() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("index") {
-        return index_cmd::run(&args[1..]);
+        return index::run(&args[1..]);
     }
     if args.first().map(String::as_str) == Some("query") {
-        return query_cmd::run(&args[1..]);
+        return query::run(&args[1..]);
     }
     if args.first().map(String::as_str) == Some("stats") {
-        return stats_cmd::run(&args[1..]);
+        return stats::run(&args[1..]);
     }
     let mut path = None;
     let mut contains = None;
@@ -90,11 +90,11 @@ pub(crate) fn run() -> ExitCode {
             println!("{name}\t{count}");
         }
     }
-    if let Err(err) = result {
-        if err.kind() != io::ErrorKind::Interrupted {
-            eprintln!("logq: {}: {err}", path.display());
-            return ExitCode::from(1);
-        }
+    if let Err(err) = result
+        && err.kind() != io::ErrorKind::Interrupted
+    {
+        eprintln!("logq: {}: {err}", path.display());
+        return ExitCode::from(1);
     }
     ExitCode::SUCCESS
 }
